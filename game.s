@@ -2,19 +2,63 @@
   .cpu cortex-m4
   .fpu softvfp
   .thumb
-  
   .global  Main
   .global  SysTick_Handler
+  .global EXTI0_IRQHandler
 
-  @ Definitions are in definitions.s to keep blinky.s "clean"
   .include "definitions.s"
-
   .equ    BLINK_PERIOD, 200
-
   .section .text
 
 Main:
   PUSH    {R4-R5,LR}
+
+   @ Initial count of button presses to 0
+  @ Count must be maintained in memory - interrupt handlers
+  @   must not rely on registers to maintain values across
+  @   different invocations of the handler (i.e. across
+  @   different presses of the pushbutton)
+  LDR   R4, =count        @ count = 0;
+  MOV   R5, #0            @
+  STR   R5, [R4]          @
+
+  @ Configure USER pushbutton (GPIO Port A Pin 0 on STM32F3 Discovery
+  @   kit) to use the EXTI0 external interrupt signal
+  @ Determined by bits 3..0 of the External Interrrupt Control
+  @   Register (EXTIICR)
+  @ STM32F303 Reference Manual 12.1.3 (pg. 249)
+  LDR     R4, =SYSCFG_EXTIICR1
+  LDR     R5, [R4]
+  BIC     R5, R5, #0b1111
+  STR     R5, [R4]
+
+  @ Enable (unmask) interrupts on external interrupt EXTI0
+  @ EXTI0 corresponds to bit 0 of the Interrupt Mask Register (IMR)
+  @ STM32F303 Reference Manual 14.3.1 (pg. 297)
+  LDR     R4, =EXTI_IMR
+  LDR     R5, [R4]
+  ORR     R5, R5, #1
+  STR     R5, [R4]
+
+  @ Set falling edge detection on EXTI0
+  @ EXTI0 corresponds to bit 0 of the Falling Trigger Selection
+  @   Register (FTSR)
+  @ STM32F303 Reference Manual 14.3.4 (pg. 298)
+  LDR     R4, =EXTI_FTSR
+  LDR     R5, [R4]
+  ORR     R5, R5, #1
+  STR     R5, [R4]
+
+  @ Enable NVIC interrupt channel (Nested Vectored Interrupt Controller)
+  @ EXTI0 corresponds to NVIC channel #6
+  @ Enable channels using the NVIC Interrupt Set Enable Register (ISER)
+  @ Writing a 1 to a bit enables the corresponding channel
+  @ Writing a 0 to a bit has no effect
+  @ STM32 Cortex-M4 Programming Manual 4.3.2 (pg. 210)
+  LDR     R4, =NVIC_ISER
+  MOV     R5, #(1<<6)
+  STR     R5, [R4]
+
 
   @ Enable GPIO port E by enabling its clock
   @ STM32F303 Reference Manual 9.4.6 (pg. 148)
@@ -23,9 +67,7 @@ Main:
   ORR     R5, R5, #(0b1 << (RCC_AHBENR_GPIOEEN_BIT))
   STR     R5, [R4]
 
-  @ We'll blink LED LD3 (the orange LED)
-
-  @ Configure LD3 for output
+  @ Configuring LEDs for output
   @ by setting bits 27:26 of GPIOE_MODER to 01 (GPIO Port E Mode Register)
   @ (by BIClearing then ORRing)
   @ STM32F303 Reference Manual 11.4.1 (pg. 237)
@@ -63,9 +105,7 @@ Main:
   LDR     R5, =BLINK_PERIOD
   STR     R5, [R4]  
 
-
   @ Configure SysTick Timer to generate an interrupt every 1ms
-
   @ STM32 Cortex-M4 Programming Manual 4.4.3 (pg. 225)
   LDR     R4, =SCB_ICSR             @ Clear any pre-existing interrupts
   LDR     R5, =SCB_ICSR_PENDSTCLR   @
@@ -92,18 +132,13 @@ Main:
   STR   R5, [R4]                    @     set TICKINT (bit 1) to 1 to enable interrupts
                                     @     set ENABLE (bit 0) to 1
 
-  @ Nothing else to do in Main
-  @ Idle loop forever (welcome to interrupts!!)
 Idle_Loop:
   B     Idle_Loop
   
 End_Main:
   POP   {R4-R5,PC}
 
-
-@
 @ SysTick interrupt handler
-@
   .type  SysTick_Handler, %function
 SysTick_Handler:
 
@@ -116,12 +151,9 @@ SysTick_Handler:
 
   SUB   R5, R5, #1                  @   countdown = countdown - 1;
   STR   R5, [R4]                    @
-
   B     .LendIfDelay                @ }
 
 .LelseFire:                         @ else {
-
-  @ STM32F303 Reference Manual 11.4.6 (pg. 239)
   LDR     R4, =GPIOE_ODR            @   Access GPIOE_ODR
   LDR     R5, [R4]                  @   Read current state of GPIOE_ODR
 
@@ -213,6 +245,31 @@ SysTick_Handler:
   POP  {R4, R5, PC}
 
 
+@
+@ External interrupt line 0 (EXTI0) interrupt handler
+@
+  .type  EXTI0_IRQHandler, %function
+EXTI0_IRQHandler:
+
+  PUSH  {R4,R5,LR}
+
+  @ Add one to count of button presses
+  LDR   R4, =count        @ count = count + 1
+  LDR   R5, [R4]          @
+  ADD   R5, R5, #1        @
+  STR   R5, [R4]          @
+
+  @ Tell microcontroller that we have handled the EXTI0 interrupt
+  @ By writing a 1 to bit 0 of the EXTI Pending Register (PR)
+  @ (Writing 0s to bits has no effect)
+  @ STM32F303 Reference Manual 14.3.6 (pg. 299)
+  LDR   R4, =EXTI_PR      @ Clear (acknowledge) the interrupt
+  MOV   R5, #(1<<0)       @
+  STR   R5, [R4]          @
+
+  @ Return from interrupt handler
+  POP  {R4,R5,PC}
+
   .section .data
 
 current_led:
@@ -222,6 +279,9 @@ current_round:
   .space  4
   
 countdown:
+  .space  4
+
+count:
   .space  4
 
   .end
